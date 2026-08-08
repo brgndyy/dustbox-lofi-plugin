@@ -1,0 +1,27 @@
+# Build outputs
+/build/
+/dist/
+
+# Generated documentation
+/docs/*.html
+/docs/*.pdf
+
+# IDE and OS files
+.DS_Store
+.vscode/
+.idea/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
