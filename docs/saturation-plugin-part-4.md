@@ -261,4 +261,4 @@ console.log('보정 후 RMS:', getRms(matchedSamples).toFixed(6));
 
 이제 JavaScript 예제에서 `Drive → tanh → Output`으로 이어지는 최소 샘플 처리 순서가 완성됐다. `getRms()`와 Output 비율 계산은 이 순서를 비교하기 위한 실험용 코드이며, 자동 보정 제품 기능은 아니다.
 
-다만 지금 코드는 이미 준비된 숫자 배열만 처리한다. 다음에는 브라우저에서 실제 오디오 파일을 불러오고, 처리 전후의 소리를 직접 들어보자.
+다음에는 JavaScript 실험을 끝내고 C++, JUCE, VST3가 각각 어떤 역할을 하는지 살펴본다. 그다음 Cubase가 전달한 실제 오디오 버퍼를 `processBlock()`에서 처리해보자.

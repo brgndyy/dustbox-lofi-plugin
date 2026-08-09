@@ -1,384 +1,469 @@
 ---
 title: '직접 Saturation 플러그인 만들어보기 5'
 date: '2026-08-09'
-description: '브라우저에서 실제 오디오 파일에 새츄레이션을 적용해보자'
+description: 'JavaScript에서 벗어나 C++와 JUCE로 실제 VST3 플러그인의 구조를 만들어보자'
 thumbnail: ''
 ---
 
-## 숫자 배열 대신 실제 오디오를 넣어보자
+## 이제 실제 플러그인으로 넘어가자
 
-앞에서는 직접 만든 샘플 배열로 새츄레이션의 동작을 확인했다.
-
-```js
-const inputSamples = [
-  0.02, 0.18, 0.46, 0.81, 0.43, 0.1, -0.25, -0.72,
-];
-```
-
-원리를 확인하기에는 충분하지만 실제 음악은 이렇게 짧은 배열로 준비되어 있지 않다.
-
-이번에는 브라우저에서 오디오 파일을 선택하고, 파일 안의 샘플 전체에 지금까지 만든 로직을 적용해본다.
+앞에서는 JavaScript로 새츄레이션의 핵심 계산을 확인했다.
 
 ```text
-오디오 파일 선택
-→ 브라우저가 파일을 샘플로 변환
-→ 각 샘플에 Drive와 tanh 적용
-→ RMS를 비교해 Output 계산
-→ 원본과 처리본 재생
+샘플
+→ Drive를 곱함
+→ tanh 적용
+→ Output을 곱함
 ```
 
-이번 장의 코드는 원리를 직접 듣기 위한 브라우저 실험이다. 실제 DustBox VST3는 C++로 구현한다.
+하지만 Cubase는 JavaScript 파일을 오디오 플러그인으로 불러오지 않는다. Cubase가 불러올 수 있는 VST3 파일을 만들어야 한다.
 
-## 브라우저는 오디오 파일을 어떻게 읽을까?
+여기서부터는 실제 DustBox 플러그인을 만드는 과정으로 넘어간다.
 
-브라우저에는 소리를 읽고 재생하고 처리하기 위한 `Web Audio API`가 있다.
-
-이 기능을 사용하려면 먼저 `AudioContext`를 만든다. AudioContext는 브라우저 안에서 오디오를 처리하고 재생하는 작업 공간이다.
-
-```js
-const audioContext = new AudioContext();
-```
-
-사용자가 선택한 MP3나 WAV 파일을 곧바로 샘플 배열처럼 사용할 수는 없다. 먼저 파일 데이터를 읽은 뒤 브라우저가 처리할 수 있는 `AudioBuffer`로 변환해야 한다.
+이번 장의 목표는 노브나 디자인을 만드는 것이 아니다. Cubase가 플러그인을 불러오고 오디오를 전달했을 때, C++ 코드가 그 샘플을 처리해 다시 돌려주는 최소 흐름을 이해하는 것이다.
 
 ```text
-MP3 또는 WAV 파일
-        ↓
-File.arrayBuffer()
-        ↓
-decodeAudioData()
-        ↓
-AudioBuffer
+Cubase
+  ↓ 오디오 버퍼 전달
+VST3 플러그인
+  ↓
+C++ processBlock()
+  ↓ Drive → tanh → Output
+Cubase로 처리된 버퍼 반환
 ```
 
-`AudioBuffer`에는 다음 정보가 들어 있다.
+## C++, JUCE, VST3는 각각 무엇일까?
+
+실제 코드를 작성하기 전에 지금부터 등장할 도구의 역할을 구분할 필요가 있다.
 
 ```text
-numberOfChannels   채널 수
-length             채널마다 들어 있는 샘플 수
-sampleRate         1초당 샘플 수
-getChannelData()   특정 채널의 샘플 배열
+C++     실제 오디오 처리 코드를 작성하는 언어
+JUCE    플러그인 개발에 필요한 공통 기능을 제공하는 프레임워크
+VST3    Cubase와 플러그인이 통신하기 위한 플러그인 형식
+CMake   소스 파일을 어떤 설정으로 빌드할지 정하는 도구
+Cubase  완성된 VST3를 불러오고 오디오를 전달하는 호스트
 ```
 
-AudioBuffer의 Sample Rate가 44.1kHz라면 한 채널에 1초당 44,100개의 샘플이 들어 있다. 스테레오는 왼쪽과 오른쪽 채널이 따로 있으므로 각 채널의 샘플을 모두 처리해야 한다.
+### C++
 
-여기서 `AudioBuffer.sampleRate`가 원본 파일의 Sample Rate와 항상 같다고 생각하면 안 된다. `decodeAudioData()`는 보통 파일을 현재 AudioContext의 Sample Rate에 맞춰 리샘플링한다. 예를 들어 48kHz 파일을 44.1kHz AudioContext에서 디코딩하면 AudioBuffer는 44.1kHz가 될 수 있다.
-
-따라서 처리할 샘플 수와 Sample Rate는 추측하지 않고 디코딩된 `AudioBuffer.length`와 `AudioBuffer.sampleRate`에서 읽는다.
-
-## 오디오 파일 선택하기
-
-HTML에는 브라우저가 기본으로 제공하는 파일 입력창을 사용한다.
-
-```html
-<input id="audio-file" type="file" accept="audio/*">
-```
-
-`accept="audio/*"`는 오디오 파일을 선택한다는 힌트를 브라우저에 전달한다.
-
-사용자가 파일을 선택하면 파일 데이터를 읽고 AudioBuffer로 변환한다.
+JavaScript에서 작성했던 계산은 실제 플러그인에서 C++ 코드가 된다.
 
 ```js
-const fileInput = document.querySelector('#audio-file');
-const audioContext = new AudioContext();
-
-let originalBuffer = null;
-
-fileInput.addEventListener('change', async () => {
-  const [file] = fileInput.files;
-  if (!file) return;
-
-  const fileData = await file.arrayBuffer();
-  originalBuffer = await audioContext.decodeAudioData(fileData);
-});
+// JavaScript
+const saturated = Math.tanh(input * drive);
 ```
 
-이 처리는 브라우저 안에서만 진행된다. 현재 데모는 선택한 파일을 서버로 전송하지 않는다.
-
-## AudioBuffer에서 샘플 꺼내기
-
-AudioBuffer는 채널별로 샘플을 보관한다.
-
-```js
-const leftSamples = originalBuffer.getChannelData(0);
+```cpp
+// C++
+const float saturated = std::tanh(input * drive);
 ```
 
-스테레오 파일이라면 다음처럼 오른쪽 채널도 있다.
+표현은 조금 다르지만 계산 순서는 같다.
 
-```js
-const rightSamples = originalBuffer.getChannelData(1);
-```
+C++를 사용하는 이유는 단순히 더 어려운 언어이기 때문이 아니다. 오디오 플러그인은 재생 중에 많은 샘플을 정해진 시간 안에 계속 처리해야 한다. C++는 메모리 사용과 실행 시점을 직접 통제하기 좋고, VST3 SDK와 JUCE도 C++를 중심으로 만들어져 있다.
 
-하지만 모든 파일이 스테레오인 것은 아니다. 채널 수를 고정하지 않고 반복문을 사용한다.
+### JUCE
 
-```js
-for (let channel = 0;
-  channel < originalBuffer.numberOfChannels;
-  channel += 1) {
-  const samples = originalBuffer.getChannelData(channel);
-  console.log(channel, samples.length);
-}
-```
+VST3를 만들려면 Cubase가 플러그인을 생성하고, 오디오를 전달하고, 파라미터를 저장하는 규칙에 맞춰야 한다.
 
-각 채널에서 얻은 `samples`는 앞에서 직접 만들었던 숫자 배열과 역할이 같다.
+이 규칙을 처음부터 직접 구현하면 새츄레이션 계산보다 플러그인 형식을 다루는 코드가 훨씬 많아진다.
+
+JUCE는 그 사이를 연결한다.
 
 ```text
-직접 만든 배열              실제 오디오 파일
-
-inputSamples                getChannelData(channel)
-[0.02, 0.18, ...]     →     Float32Array(44100) ...
+Cubase의 VST3 호출
+        ↓
+JUCE의 플러그인 래퍼
+        ↓
+우리가 작성한 AudioProcessor
 ```
 
-차이는 샘플이 훨씬 많다는 점이다.
+JUCE를 사용해도 새츄레이션 알고리즘이 자동으로 생기는 것은 아니다. `Drive → tanh → Output` 계산은 우리가 작성한다. JUCE는 Cubase가 전달한 샘플을 C++ 코드에서 다룰 수 있도록 연결해준다.
 
-## 모든 채널에 새츄레이션 적용하기
+### VST3
 
-원본 AudioBuffer를 직접 바꾸지 않고 같은 길이와 채널 수를 가진 새 AudioBuffer를 만든다. 그래야 원본과 처리본을 각각 재생하며 비교할 수 있다.
+VST3는 프로그래밍 언어가 아니라 플러그인 형식이다.
 
-```js
-function createSaturatedBuffer(inputBuffer, drive) {
-  const outputBuffer = audioContext.createBuffer(
-    inputBuffer.numberOfChannels, inputBuffer.length, inputBuffer.sampleRate,
-  );
-
-  for (let channel = 0;
-    channel < inputBuffer.numberOfChannels;
-    channel += 1) {
-    const input = inputBuffer.getChannelData(channel);
-    const output = outputBuffer.getChannelData(channel);
-
-    for (let i = 0; i < input.length; i += 1) {
-      output[i] = Math.tanh(input[i] * drive);
-    }
-  }
-
-  return outputBuffer;
-}
-```
-
-처리 순서는 지금까지 만든 코드와 같다.
+완성된 macOS VST3는 다음과 같은 번들로 만들어진다.
 
 ```text
-input[i]
-   ↓ Drive를 곱함
-input[i] * drive
-   ↓ tanh 적용
-output[i]
+DustBox LoFi.vst3
 ```
 
-바뀐 것은 샘플 하나가 아니라 AudioBuffer의 모든 채널과 모든 샘플에 반복한다는 점뿐이다.
+Cubase는 이 번들을 스캔하고, 안에 들어 있는 플러그인을 생성한 뒤 오디오 처리를 요청한다.
 
-## AudioBuffer의 RMS 구하기
+### CMake
 
-앞에서 만든 `getRms()`는 배열 하나를 받았다. 실제 오디오에서는 모든 채널의 샘플을 합쳐 RMS를 계산한다.
+CMake는 C++ 컴파일러가 아니다. 어떤 소스 파일과 JUCE 모듈을 사용해 어떤 플러그인을 만들 것인지 빌드 설정을 만든다.
 
-```js
-function getRmsFromBuffer(buffer) {
-  let squareSum = 0;
-  let sampleCount = 0;
-
-  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-    const samples = buffer.getChannelData(channel);
-
-    for (let i = 0; i < samples.length; i += 1) {
-      squareSum += samples[i] * samples[i];
-    }
-
-    sampleCount += samples.length;
-  }
-
-  return sampleCount === 0 ? 0 : Math.sqrt(squareSum / sampleCount);
-}
-```
-
-계산 원리는 달라지지 않았다.
+DustBox 저장소에서는 루트의 `CMakeLists.txt`가 그 역할을 한다.
 
 ```text
-모든 채널의 샘플을 제곱해 더함
-→ 전체 샘플 수로 나눔
-→ 제곱근 적용
-→ AudioBuffer 전체의 RMS
+CMakeLists.txt
+→ C++ 소스와 JUCE를 연결
+→ VST3 빌드 설정 생성
+→ 컴파일러가 실제 바이너리 생성
 ```
 
-여기서 구한 RMS는 원본과 처리본의 신호 크기를 같은 방식으로 비교하기 위한 값이다. 사람이 느끼는 음량을 완벽하게 나타내는 값은 아니다.
+## 실제 프로젝트 구조 보기
 
-## Output을 계산하고 적용하기
-
-이제 원본 RMS와 새츄레이션 처리 후 RMS를 구한다.
-
-```js
-const inputRms = getRmsFromBuffer(originalBuffer);
-const processedBuffer = createSaturatedBuffer(originalBuffer, 2);
-const saturatedRms = getRmsFromBuffer(processedBuffer);
-```
-
-원본과 같은 RMS로 맞추기 위한 Output은 다음처럼 계산한다.
-
-```js
-const outputGain = saturatedRms === 0
-  ? 1
-  : inputRms / saturatedRms;
-```
-
-여기서 `outputGain`은 dB가 아니라 각 샘플에 곱하는 선형 배율이다. 실제 검증값 `0.614626`은 약 `-4.23dB`에 해당한다.
-
-RMS를 맞춰도 사람이 느끼는 음량이나 파형의 가장 높은 값인 Peak까지 같아지는 것은 아니다. Output을 적용한 뒤 Peak가 허용 범위를 넘지 않는지도 별도로 확인해야 한다. RMS 보정 자체가 클리핑을 자동으로 막아주지는 않는다.
-
-계산한 Output을 처리된 모든 샘플에 곱한다.
-
-```js
-function applyOutputGain(buffer, outputGain) {
-  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-    const samples = buffer.getChannelData(channel);
-
-    for (let i = 0; i < samples.length; i += 1) {
-      samples[i] *= outputGain;
-    }
-  }
-}
-
-applyOutputGain(processedBuffer, outputGain);
-```
-
-전체 처리 순서는 다음과 같다.
+현재 DustBox 프로젝트에서 처음 확인할 파일은 다음과 같다.
 
 ```text
-원본 AudioBuffer의 RMS 측정
-        ↓
-새 AudioBuffer 생성
-        ↓
-모든 채널의 모든 샘플에 Drive와 tanh 적용
-        ↓
-처리된 AudioBuffer의 RMS 측정
-        ↓
-원본 RMS ÷ 처리 후 RMS
-        ↓
-처리된 모든 샘플에 Output 적용
+dustbox-lofi-plugin/
+├── CMakeLists.txt
+├── JUCE/
+└── Source/
+    ├── PluginProcessor.h
+    ├── PluginProcessor.cpp
+    ├── PluginEditor.h
+    └── PluginEditor.cpp
 ```
 
-## 원본과 처리본 재생하기
+각 파일의 역할은 다음과 같다.
 
-AudioBuffer를 재생하려면 `AudioBufferSourceNode`를 만든다.
+```text
+CMakeLists.txt
+→ VST3 프로젝트의 이름, 형식, 소스 파일, JUCE 모듈 설정
 
-```js
-let playingSource = null;
+PluginProcessor.h / .cpp
+→ 실제 오디오 처리와 파라미터 상태
 
-function stopPlayback() {
-  if (!playingSource) return;
-
-  playingSource.onended = null;
-  try {
-    playingSource.stop();
-  } catch {
-    // 이미 끝난 source는 다시 멈출 필요가 없다.
-  }
-  playingSource.disconnect();
-  playingSource = null;
-}
-
-async function playBuffer(buffer) {
-  await audioContext.resume();
-  stopPlayback();
-
-  const source = audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioContext.destination);
-  source.onended = () => {
-    source.disconnect();
-    if (playingSource === source) playingSource = null;
-  };
-  playingSource = source;
-  source.start();
-}
+PluginEditor.h / .cpp
+→ 플러그인 창과 노브 같은 화면
 ```
 
-`audioContext.destination`은 브라우저가 소리를 내보낼 최종 목적지다. 일반적으로 현재 사용 중인 스피커나 오디오 출력 장치로 연결된다.
+새츄레이션의 소리를 만드는 핵심은 `PluginProcessor.cpp`에 들어간다. 화면은 소리를 처리하지 않는다. 노브가 바뀐 값을 Processor에 전달할 뿐이다.
 
-AudioBufferSourceNode는 한 번 `start()`한 뒤 다시 사용할 수 없는 일회용 노드다. 재생 버튼을 누를 때마다 새 노드를 만들고, 기존 재생은 `stop()`과 `disconnect()`로 정리한다. 새 파일을 선택하거나 Drive를 바꿀 때도 이전 재생을 멈춰야 화면에 표시된 상태와 실제 소리가 어긋나지 않는다.
+## CMake에서 VST3 만들기
 
-이제 원본 AudioBuffer와 처리된 AudioBuffer를 각각 넣어 재생할 수 있다.
+DustBox의 `CMakeLists.txt`에는 JUCE에게 오디오 플러그인을 만들라고 요청하는 코드가 있다.
 
-```js
-playOriginalButton.addEventListener(
-  'click',
-  () => playBuffer(originalBuffer),
-);
+```cmake
+juce_add_plugin(DustBoxLoFi
+    COMPANY_NAME "GNDY Audio"
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    FORMATS VST3
+    PRODUCT_NAME "DustBox LoFi"
+)
+```
 
-playProcessedButton.addEventListener(
-  'click',
-  () => playBuffer(processedBuffer),
+중요한 항목부터 보면 다음과 같다.
+
+```text
+DustBoxLoFi
+→ CMake에서 사용할 빌드 대상 이름
+
+IS_SYNTH FALSE
+→ 소리를 새로 만드는 신시사이저가 아니라 입력 소리를 처리함
+
+FORMATS VST3
+→ VST3 형식으로 빌드함
+
+PRODUCT_NAME
+→ Cubase에서 표시될 플러그인 이름
+```
+
+그다음 실제로 컴파일할 C++ 파일을 연결한다.
+
+```cmake
+target_sources(DustBoxLoFi
+    PRIVATE
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp
+        Source/PluginProcessor.h
+        Source/PluginEditor.h
+)
+```
+
+마지막으로 오디오 플러그인과 DSP 기능에 필요한 JUCE 모듈을 연결한다.
+
+```cmake
+target_link_libraries(DustBoxLoFi
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_dsp
+)
+```
+
+이 설정이 있다고 새츄레이션이 완성되는 것은 아니다. 아직은 C++ 코드를 VST3로 빌드할 수 있는 틀을 만든 것이다.
+
+## Processor와 Editor를 구분하자
+
+플러그인은 크게 두 부분으로 나눌 수 있다.
+
+```text
+Processor
+→ 실제 오디오 샘플 처리
+→ 재생 중에도 계속 작동
+
+Editor
+→ 노브와 글자 표시
+→ 사용자의 조작을 Processor에 전달
+```
+
+플러그인 창을 닫아도 소리는 계속 처리되어야 한다. 따라서 새츄레이션 계산을 Editor에 넣으면 안 된다.
+
+```text
+PluginEditor.cpp       화면
+PluginProcessor.cpp    소리
+```
+
+이번 장에서는 튜토리얼의 최소 예제만 떼어 화면 연결을 잠시 제외한다. 실제 DustBox 저장소에는 이미 `AudioProcessorValueTreeState` 파라미터와 여섯 개의 노브가 구현되어 있다. 완성된 코드를 처음부터 한꺼번에 설명하지 않고, Processor의 최소 오디오 흐름부터 다시 쌓아가는 것이다.
+
+## Cubase는 언제 C++ 코드를 실행할까?
+
+JUCE의 `AudioProcessor`에는 플러그인의 주요 실행 시점이 함수로 나뉘어 있다.
+
+```text
+플러그인 생성
+    ↓
+prepareToPlay()
+    ↓
+processBlock() 반복
+    ↓
+releaseResources()
+```
+
+이 흐름이 플러그인 실행 중에 딱 한 번만 일어나는 것은 아니다. Cubase가 재생을 멈추거나 오디오 장치의 Sample Rate와 버퍼 설정을 바꾸면 자원을 해제한 뒤 `prepareToPlay()`를 다시 호출할 수 있다.
+
+### `prepareToPlay()`
+
+재생을 시작하기 전에 Cubase가 Sample Rate와 한 번에 전달할 수 있는 최대 샘플 수를 알려준다.
+
+```cpp
+void prepareToPlay(double sampleRate, int maximumBlockSize);
+```
+
+지연 버퍼나 필터처럼 미리 준비해야 하는 메모리는 여기서 만든다. 재생 중인 `processBlock()` 안에서 계속 새 메모리를 만드는 것은 피해야 한다.
+
+이번 최소 새츄레이션은 샘플마다 계산만 하므로 아직 준비할 버퍼가 없다.
+
+### `processBlock()`
+
+실제 오디오 처리는 `processBlock()`에서 일어난다.
+
+```cpp
+void processBlock(
+    juce::AudioBuffer<float>& buffer,
+    juce::MidiBuffer& midiMessages
 );
 ```
 
-브라우저는 자동 재생을 제한하므로 실제 데모에서는 사용자가 버튼을 눌렀을 때만 재생한다.
-
-## 실제로 실행해보기
-
-이번 장의 전체 데모는 다음 파일에 작성했다.
+Cubase는 곡 전체를 한 번에 주지 않는다. 짧은 오디오 버퍼를 반복해서 전달한다.
 
 ```text
-examples/browser-saturation-demo.html
+첫 번째 버퍼  [샘플, 샘플, 샘플, ...]
+두 번째 버퍼  [샘플, 샘플, 샘플, ...]
+세 번째 버퍼  [샘플, 샘플, 샘플, ...]
 ```
 
-별도의 라이브러리나 설치 과정은 없다. 파일을 브라우저에서 열고 오디오 파일을 선택하면 된다.
-
-실제 검증에서는 44.1kHz, 440Hz 사인파 WAV를 생성해 브라우저에서 불러왔다. Drive 2를 적용한 결과는 다음과 같았다.
+`AudioBuffer<float>`에는 채널별 샘플이 들어 있다.
 
 ```text
-원본 RMS       0.353548
-처리 후 RMS    0.575224
-Output         0.614626
-보정 후 RMS    0.353548
+buffer
+├── channel 0: 왼쪽 또는 모노 채널
+└── channel 1: 오른쪽 채널
 ```
+
+플러그인은 이 버퍼의 값을 직접 바꾼다. 처리가 끝나 함수가 반환되면 Cubase는 바뀐 값을 다음 오디오 단계로 보낸다.
+
+### `releaseResources()`
+
+Cubase가 현재 오디오 처리를 멈추고 준비했던 자원이 더 이상 필요하지 않을 때 호출한다.
+
+```cpp
+void releaseResources();
+```
+
+`prepareToPlay()`에서 만든 큰 임시 버퍼나 장치 관련 자원이 있다면 여기서 정리할 수 있다. 이후 재생이나 오디오 설정이 바뀌면 `prepareToPlay()`가 다시 호출될 수 있으므로, 재준비되어도 안전하게 작성해야 한다.
+
+이번 최소 새츄레이션 예제는 별도 자원을 만들지 않으므로 `releaseResources()`에서 정리할 것도 없다.
+
+## 아무 처리도 하지 않으면 어떻게 될까?
+
+가장 작은 `processBlock()`은 다음과 같다.
+
+```cpp
+void DustBoxLoFiAudioProcessor::processBlock(
+    juce::AudioBuffer<float>& buffer,
+    juce::MidiBuffer&
+)
+{
+    juce::ScopedNoDenormals noDenormals;
+}
+```
+
+코드 안에서 `buffer`를 바꾸지 않았으므로 입력된 샘플이 그대로 남아 있다.
 
 ```text
-원본 RMS와 보정 후 RMS
-0.353548 = 0.353548
+Cubase가 전달한 입력 버퍼
+→ 아무 값도 바꾸지 않음
+→ 같은 버퍼를 Cubase가 다시 사용
 ```
 
-원본 재생, 새츄레이션 처리, 처리본 재생 버튼도 모두 활성화됐고 브라우저 콘솔 오류는 발생하지 않았다.
+즉 플러그인은 로드되지만 소리는 바뀌지 않는 통과 상태가 된다.
 
-다만 RMS가 같아졌다고 음색까지 같아진 것은 아니다. `tanh`가 파형을 바꾸면서 생긴 배음은 남아 있다. Output은 바뀐 파형의 최종 크기만 맞춘다.
+`ScopedNoDenormals`는 CPU가 매우 작은 부동소수점 값을 비효율적으로 처리하는 상황을 막기 위한 JUCE 도구다. 지금 단계에서는 오디오 처리 함수의 시작 부분에 두는 안전장치라고 이해하면 충분하다.
 
-<div style="break-before: page;"></div>
+## JavaScript 계산을 processBlock으로 옮기기
 
-## 브라우저 데모와 실제 VST3의 차이
+앞에서 만든 최소 계산은 다음과 같았다.
 
-이번 코드는 오디오 파일 전체를 메모리에 읽은 다음 한 번에 처리한다.
+```js
+return Math.tanh(input * drive) * output;
+```
+
+C++에서는 다음처럼 옮길 수 있다.
+
+```cpp
+const float saturated = std::tanh(input * drive);
+const float result = saturated * output;
+```
+
+이 계산을 모든 채널과 모든 샘플에 적용한다.
+
+```cpp
+void DustBoxLoFiAudioProcessor::processBlock(
+    juce::AudioBuffer<float>& buffer,
+    juce::MidiBuffer&
+)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    const float drive = 2.0f;
+    const float output = 0.75f;
+
+    for (int channel = 0;
+         channel < buffer.getNumChannels();
+         ++channel)
+    {
+        auto* samples = buffer.getWritePointer(channel);
+
+        for (int sample = 0;
+             sample < buffer.getNumSamples();
+             ++sample)
+        {
+            const float driven = samples[sample] * drive;
+            const float saturated = std::tanh(driven);
+            samples[sample] = saturated * output;
+        }
+    }
+}
+```
+
+이중 반복문이 하는 일은 단순하다.
 
 ```text
-브라우저 데모
-오디오 파일 전체를 읽음
-→ 전체 샘플 처리
-→ 결과 재생
+첫 번째 반복문
+→ 왼쪽, 오른쪽 같은 채널을 하나씩 선택
+
+두 번째 반복문
+→ 선택한 채널의 샘플을 하나씩 처리
 ```
 
-실제 VST3 플러그인은 곡 전체를 미리 받지 않는다. Cubase가 재생 중인 오디오를 짧은 샘플 묶음으로 계속 전달한다.
+`getWritePointer(channel)`은 선택한 채널의 샘플을 직접 수정할 수 있는 위치를 돌려준다.
+
+```cpp
+auto* samples = buffer.getWritePointer(channel);
+```
+
+`samples[sample]`은 현재 처리할 샘플 하나다.
+
+```cpp
+const float driven = samples[sample] * drive;
+const float saturated = std::tanh(driven);
+samples[sample] = saturated * output;
+```
+
+입력이 `0.5`, Drive가 `2`, Output이 `0.75`라면 다음 순서로 처리된다.
 
 ```text
-실제 VST3
-Cubase가 짧은 오디오 버퍼 전달
-→ C++가 즉시 처리
-→ Cubase에 반환
-→ 다음 버퍼 처리
+입력             0.5
+Drive 적용       0.5 × 2 = 1
+새츄레이션       tanh(1) = 약 0.761594
+Output 적용      0.761594 × 0.75 = 약 0.571196
+최종 샘플        약 0.571196
 ```
 
-새츄레이션의 계산 원리는 같지만 오디오를 전달받고 처리하는 방식은 다르다.
+JavaScript 배열에서 확인했던 계산이 이제 Cubase가 전달한 실제 오디오 버퍼 안에서 실행된다.
 
-이번 데모의 자동 Output 계산은 원본과 처리본의 전체 RMS를 먼저 알아야 한다. 파일 전체를 읽을 수 있는 오프라인 실험이기 때문에 가능한 방식이다.
+위 코드는 원리를 보기 위해 DustBox의 HEAT 처리만 최소 형태로 분리한 예제다. 현재 DustBox 전체 `processBlock()`을 그대로 이 코드로 교체하라는 뜻은 아니다.
 
-실시간 VST3는 아직 재생되지 않은 미래의 샘플을 알 수 없다. 따라서 다음 장에서는 Output을 사용자가 정한 고정 선형 배율로 적용한다.
+## 왜 RMS 자동 보정 코드는 넣지 않을까?
+
+앞 장에서는 원본 배열 전체와 처리된 배열 전체의 RMS를 먼저 구한 뒤 Output을 계산했다.
 
 ```text
-실시간 VST3의 기본 흐름
-짧은 버퍼를 받음
-→ 각 샘플에 Drive와 tanh 적용
-→ 사용자가 정한 Output을 곱함
-→ 즉시 반환
+원본 전체 RMS ÷ 처리 후 전체 RMS
 ```
 
-자동 보정 기능을 나중에 추가한다면 지금까지 들어온 신호로 RMS를 추적하고, Output이 갑자기 바뀌지 않도록 변화를 부드럽게 이어야 한다. 버퍼마다 계산한 비율을 즉시 적용하면 음량이 출렁이거나 경계에서 불연속이 생길 수 있다.
+실시간 플러그인은 아직 재생되지 않은 미래의 샘플을 알 수 없다. 따라서 곡 전체 RMS를 미리 구하는 방식을 `processBlock()`에 그대로 넣을 수 없다.
 
-실시간 오디오 처리 함수 안에서는 파일 전체를 다시 훑거나 처리할 때마다 새 AudioBuffer를 만들지 않는다. Cubase가 전달한 버퍼를 정해진 시간 안에 바로 처리한다.
+이번 장에서 분리한 최소 예제에서는 Output을 고정된 선형 배율 `0.75`로 둔다. 실제 DustBox에는 이미 Output 파라미터와 노브가 연결되어 있다. 다음 장에서는 그 완성된 연결을 처음부터 따라가며 구현 원리를 설명한다.
 
-다음에는 JavaScript로 만든 `Drive → tanh → 고정 Output` 로직을 실제 DustBox의 C++ 오디오 처리 코드에 연결해보자.
+자동 보정을 제품 기능으로 만들려면 지금까지 들어온 신호의 크기를 추적하고, 값이 갑자기 바뀌지 않도록 부드럽게 움직이는 별도의 설계가 필요하다. 지금은 만들지 않는다.
+
+## processBlock에서 하지 말아야 할 일
+
+`processBlock()`은 재생 중에 계속 호출된다. 처리 시간이 늦어지면 소리가 끊기거나 잡음이 날 수 있다.
+
+따라서 다음 작업은 오디오 처리 함수 안에서 피한다.
+
+```text
+새 메모리를 계속 할당하기
+파일 읽기
+네트워크 요청
+잠금이 풀릴 때까지 기다리기
+화면 그리기
+곡 전체를 다시 훑기
+```
+
+필요한 메모리는 `prepareToPlay()`에서 준비하고, `processBlock()`에서는 이미 준비된 버퍼와 값으로 정해진 계산만 수행한다.
+
+## 실제 VST3 빌드하기
+
+DustBox 저장소 루트에서 다음 명령을 실행한다.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target DustBoxLoFi_VST3
+```
+
+첫 번째 명령은 `CMakeLists.txt`를 읽어 빌드 설정을 만든다.
+
+두 번째 명령은 C++와 JUCE 코드를 실제 VST3로 컴파일한다.
+
+완성된 플러그인은 다음 경로에서 확인할 수 있다.
+
+```text
+build/DustBoxLoFi_artefacts/Release/VST3/DustBox LoFi.vst3
+```
+
+macOS에서 Cubase가 VST3를 찾는 대표적인 경로는 다음과 같다.
+
+```text
+~/Library/Audio/Plug-Ins/VST3/
+/Library/Audio/Plug-Ins/VST3/
+```
+
+현재 프로젝트는 `COPY_PLUGIN_AFTER_BUILD TRUE`로 빌드 후 사용자 VST3 폴더 복사를 요청한다. 먼저 build 경로의 결과물이 생성됐는지 확인한다.
+
+## 이번 장에서 만든 것
+
+```text
+CMake가 VST3 빌드 설정을 만듦
+        ↓
+JUCE가 Cubase와 C++ Processor를 연결
+        ↓
+Cubase가 processBlock()에 오디오 버퍼 전달
+        ↓
+C++가 모든 채널과 샘플에
+Drive → tanh → Output 적용
+        ↓
+처리된 버퍼가 Cubase로 돌아감
+```
+
+이번 장의 최소 예제에서는 Drive와 Output을 코드에 고정하고 화면 연결을 제외했다. 실제 DustBox에는 이미 파라미터와 노브가 구현되어 있다. 다음 장에서는 실제 코드의 `heat`와 `output` 등록, 노브 연결, Cubase 자동화와 프로젝트 저장을 순서대로 분해한다. 지금까지 `drive`라고 부른 입력 증폭은 HEAT 내부 계산으로 이어진다.
