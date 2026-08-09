@@ -78,7 +78,37 @@ function processSamples(samples, drive, output = 1) {
 
 Output을 무조건 0.5로 정할 수는 없다. 입력 소리와 Drive 값에 따라 처리 후 음량이 달라지기 때문이다.
 
-먼저 처리 전후 샘플의 전체 크기를 비교해야 한다. 여기서는 각 샘플을 제곱해 평균을 낸 뒤 제곱근을 구하는 `RMS`를 사용한다. RMS는 시간 구간 안에서 신호가 어느 정도 크기를 유지하는지 숫자 하나로 나타내는 방법이다.
+먼저 처리 전후 샘플의 전체 크기를 비교해야 한다. 여기서는 `RMS`를 사용한다.
+
+## RMS는 왜 필요할까?
+
+RMS는 `Root Mean Square`의 줄임말이다. 한국어로 풀면 제곱한 값의 평균에 다시 제곱근을 씌운 값이다. 일정 구간의 신호가 어느 정도 크기를 유지하는지 숫자 하나로 비교할 때 쓴다.
+
+샘플의 크기를 단순히 더해서 평균을 내면 안 될까?
+
+소리의 파형은 0을 기준으로 양수와 음수를 오간다. 두 샘플이 `0.5`, `-0.5`라면 일반 평균은 0이 된다.
+
+```text
+(0.5 + -0.5) ÷ 2 = 0
+```
+
+하지만 실제로 신호가 없는 것은 아니다. 서로 반대편에 있는 두 값이 계산 과정에서 상쇄됐을 뿐이다.
+
+RMS는 이 문제를 세 단계로 처리한다.
+
+```text
+샘플              0.5,  -0.5
+                    ↓ 각각 제곱
+제곱한 값         0.25,  0.25
+                    ↓ 평균
+제곱의 평균       0.25
+                    ↓ 제곱근
+RMS               0.5
+```
+
+먼저 각 샘플을 제곱하면 음수도 양수가 되어 서로 상쇄되지 않는다. 그 값들의 평균을 구한 뒤 제곱근을 씌우면, 제곱되어 바뀐 스케일을 원래 샘플 크기의 스케일로 되돌릴 수 있다.
+
+이를 코드로 옮기면 다음과 같다.
 
 ```js
 function getRms(samples) {
@@ -91,9 +121,18 @@ function getRms(samples) {
     0,
   );
 
-  return Math.sqrt(squareSum / samples.length);
+  const meanSquare = squareSum / samples.length;
+  return Math.sqrt(meanSquare);
 }
 ```
+
+```text
+sample * sample                 각 샘플을 제곱
+squareSum / samples.length      제곱한 값의 평균
+Math.sqrt(meanSquare)           평균의 제곱근
+```
+
+RMS가 사람에게 들리는 음량을 완벽하게 나타내는 것은 아니다. 귀는 주파수와 소리의 지속 시간에도 영향을 받는다. 여기서는 새츄레이션 전후의 신호 크기를 같은 기준으로 비교하기 위해 RMS를 사용한다.
 
 3장에서 사용한 샘플 배열을 다시 넣어보자.
 
@@ -201,7 +240,8 @@ function getRms(samples) {
     (sum, sample) => sum + sample * sample,
     0,
   );
-  return Math.sqrt(squareSum / samples.length);
+  const meanSquare = squareSum / samples.length;
+  return Math.sqrt(meanSquare);
 }
 
 const inputSamples = [0.02, 0.18, 0.46, 0.81, 0.43, 0.1, -0.25, -0.72];
@@ -217,16 +257,6 @@ console.log('처리 전 RMS:', getRms(inputSamples).toFixed(6));
 console.log('새츄레이션 후 RMS:', getRms(saturatedSamples).toFixed(6));
 console.log('Output:', output.toFixed(6));
 console.log('보정 후 RMS:', getRms(matchedSamples).toFixed(6));
-```
-
-실행 흐름은 다음과 같다.
-
-```text
-샘플 배열을 받는다
-→ 각 샘플에 Drive를 곱한다
-→ tanh로 파형을 바꾼다
-→ Output을 곱한다
-→ 처리된 샘플 배열을 반환한다
 ```
 
 이제 JavaScript 예제에서 `Drive → tanh → Output`으로 이어지는 최소 샘플 처리 순서가 완성됐다. `getRms()`와 Output 비율 계산은 이 순서를 비교하기 위한 실험용 코드이며, 자동 보정 제품 기능은 아니다.
