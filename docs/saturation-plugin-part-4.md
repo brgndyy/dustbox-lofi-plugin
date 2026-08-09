@@ -9,6 +9,8 @@ thumbnail: ''
 
 3장에서는 샘플 배열 전체에 새츄레이션을 적용했다.
 
+이번 장의 JavaScript 코드는 신호 처리 원리를 확인하기 위한 예제다. 실제 DustBox VST3 플러그인은 C++로 구현한다.
+
 ```js
 function saturate(input, drive) {
   const driven = input * drive;
@@ -20,7 +22,7 @@ function processSamples(samples, drive) {
 }
 ```
 
-Drive를 높이면 `tanh` 곡선에 더 큰 값이 들어간다. 파형의 큰 부분은 완만하게 눌리고 배음도 생기지만, 작은 입력은 원래보다 크게 나올 수 있다. 처리 후의 전체 음량이 커지는 이유다.
+Drive를 높이면 `tanh`에 더 큰 값이 들어간다. `tanh`의 비선형 곡선이 파형을 바꾸어 배음을 만들고, 큰 값일수록 출력의 증가 폭을 줄인다. 이 예제에서는 작은 값과 중간 크기의 값이 원본보다 커지면서 처리 후 RMS도 커진다. 다만 처리 후 RMS가 항상 커지는 것은 아니며, 결과는 입력 신호와 Drive 값에 따라 달라진다.
 
 소리는 조금만 커져도 더 선명하고 힘 있게 느껴지기 쉽다. 이 상태로 원본과 비교하면 새츄레이션의 음색이 좋아진 것인지, 단순히 음량이 커서 좋아진 것인지 구분하기 어렵다.
 
@@ -56,7 +58,7 @@ function saturate(input, drive, output) {
 0.8 × 1 = 0.8
 ```
 
-`output`이 0.5면 절반으로 줄인다.
+`output`이 0.5면 `tanh`를 지난 각 샘플의 진폭을 절반으로 줄인다. 귀에 들리는 음량이 정확히 절반이 된다는 뜻은 아니다.
 
 ```text
 0.8 × 0.5 = 0.4
@@ -80,6 +82,10 @@ Output을 무조건 0.5로 정할 수는 없다. 입력 소리와 Drive 값에 �
 
 ```js
 function getRms(samples) {
+  if (samples.length === 0) {
+    throw new Error('RMS를 계산할 샘플이 없습니다.');
+  }
+
   const squareSum = samples.reduce(
     (sum, sample) => sum + sample * sample,
     0,
@@ -105,8 +111,8 @@ const inputSamples = [
 
 const saturatedSamples = processSamples(inputSamples, 2);
 
-console.log(getRms(inputSamples));
-console.log(getRms(saturatedSamples));
+console.log('처리 전 RMS:', getRms(inputSamples).toFixed(6));
+console.log('처리 후 RMS:', getRms(saturatedSamples).toFixed(6));
 ```
 
 실행 결과는 다음과 같다.
@@ -119,10 +125,16 @@ console.log(getRms(saturatedSamples));
 Drive 2를 적용한 뒤 RMS가 커졌다. 처리 후 RMS를 원본과 비슷하게 맞추려면 다음 비율을 구한다.
 
 ```js
-const output = getRms(inputSamples) / getRms(saturatedSamples);
+const saturatedRms = getRms(saturatedSamples);
+const output =
+  saturatedRms === 0
+    ? 1
+    : getRms(inputSamples) / saturatedRms;
 
-console.log(output);
+console.log('Output:', output.toFixed(6));
 ```
+
+처리 후 RMS가 0이면 비율을 계산할 수 없으므로 Output을 1로 둔다. 예를 들어 입력이 무음이면 RMS를 맞출 필요도 없다.
 
 ```text
 Output: 0.742743
@@ -133,14 +145,14 @@ Output: 0.742743
 ```js
 const matchedSamples = processSamples(inputSamples, 2, output);
 
-console.log(getRms(matchedSamples));
+console.log('보정 후 RMS:', getRms(matchedSamples).toFixed(6));
 ```
 
 ```text
 보정 후 RMS: 0.457753
 ```
 
-이번 예제에서는 Output을 약 0.743으로 두자 처리 전후 RMS가 같아졌다.
+이번 예제에서는 Output을 약 0.743으로 두었더니 처리 전후 RMS가 같아졌다.
 
 ```text
 처리 전 RMS       0.457753
@@ -163,7 +175,7 @@ Drive를 올림
 → 원본과 비슷한 음량에서 비교
 ```
 
-자동 보정은 편리하지만 측정 구간에 따라 값이 계속 달라질 수 있다. Output이 빠르게 움직이면 의도하지 않은 음량 변화도 생긴다. 지금 만드는 최소 예제에서는 자동 보정 기능을 넣지 않고, Output을 하나의 고정된 값으로 둔다.
+자동 보정은 측정 구간에 따라 값이 계속 달라질 수 있다. Output이 빠르게 변하면 의도하지 않은 음량 변화도 생길 수 있다. 여기서는 준비된 샘플 배열 전체의 RMS를 한 번 측정해 Output 값을 구한 뒤, 그 값을 고정해서 결과를 확인한다. 이는 Output의 역할을 설명하기 위한 실험이며, 실제 DustBox VST3에 자동 RMS 보정 기능이 있다는 뜻은 아니다.
 
 RMS가 같다고 사람에게 완전히 같은 음량으로 들리는 것도 아니다. 귀는 주파수와 소리의 지속 시간에도 영향을 받는다. RMS는 이번 실험에서 처리 전후의 크기를 비교하기 위한 간단한 기준이다.
 
@@ -181,6 +193,10 @@ function processSamples(samples, drive, output = 1) {
 }
 
 function getRms(samples) {
+  if (samples.length === 0) {
+    throw new Error('RMS를 계산할 샘플이 없습니다.');
+  }
+
   const squareSum = samples.reduce(
     (sum, sample) => sum + sample * sample,
     0,
@@ -188,18 +204,19 @@ function getRms(samples) {
   return Math.sqrt(squareSum / samples.length);
 }
 
-const inputSamples = [
-  0.02, 0.18, 0.46, 0.81, 0.43, 0.1, -0.25, -0.72,
-];
+const inputSamples = [0.02, 0.18, 0.46, 0.81, 0.43, 0.1, -0.25, -0.72];
 
 const saturatedSamples = processSamples(inputSamples, 2);
-const output = getRms(inputSamples) / getRms(saturatedSamples);
+const saturatedRms = getRms(saturatedSamples);
+const output = saturatedRms === 0
+  ? 1
+  : getRms(inputSamples) / saturatedRms;
 const matchedSamples = processSamples(inputSamples, 2, output);
 
-console.log('처리 전 RMS:', getRms(inputSamples));
-console.log('새츄레이션 후 RMS:', getRms(saturatedSamples));
-console.log('Output:', output);
-console.log('보정 후 RMS:', getRms(matchedSamples));
+console.log('처리 전 RMS:', getRms(inputSamples).toFixed(6));
+console.log('새츄레이션 후 RMS:', getRms(saturatedSamples).toFixed(6));
+console.log('Output:', output.toFixed(6));
+console.log('보정 후 RMS:', getRms(matchedSamples).toFixed(6));
 ```
 
 실행 흐름은 다음과 같다.
@@ -212,6 +229,6 @@ console.log('보정 후 RMS:', getRms(matchedSamples));
 → 처리된 샘플 배열을 반환한다
 ```
 
-이제 새츄레이션의 최소 처리 구조가 완성됐다.
+이제 JavaScript 예제에서 `Drive → tanh → Output`으로 이어지는 최소 샘플 처리 순서가 완성됐다. `getRms()`와 Output 비율 계산은 이 순서를 비교하기 위한 실험용 코드이며, 자동 보정 제품 기능은 아니다.
 
 다만 지금 코드는 이미 준비된 숫자 배열만 처리한다. 다음에는 브라우저에서 실제 오디오 파일을 불러오고, 처리 전후의 소리를 직접 들어보자.
